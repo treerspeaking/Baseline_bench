@@ -181,3 +181,4 @@ mean-teacher
 cifar-10*
 gcc
 .vscode
+cuda

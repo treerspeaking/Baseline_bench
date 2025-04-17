@@ -185,7 +185,7 @@ class MyCifar10(BaseDataset):
             train (Bool): if True this will read train dataset else it will read test dataset
             transforms (Transform): the transformations that will be apply to the dataset
         """
-        self.__init__(train, transforms)
+        super().__init__(train, transforms)
         
         self.data = []
         self.targets = []

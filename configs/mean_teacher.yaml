@@ -1,0 +1,41 @@
+# arguments for dataset
+dataset: cifar10
+num_classes: 10
+# crop_size: 513
+# data_root: ./data
+
+# arguments for training
+# epochs: 30
+# labeled_batch_size: 124
+# unlabeled_batch_size: 388
+
+lr: 0.05
+ramp_up_func: sigmoid_rampup
+ramp_up_length: 5
+ramp_down_length: 80000
+steps: 70000
+
+ema_decay_during_ramp_up: 0.999
+ema_decay_after_ramp_up: 0.999
+# adam_beta_1: 0.9
+# adam_beta_2_during_ramp_up: 0.99
+# adam_beta_2_after_ramp_up: 0.99
+consistency_weight: 100.0
+residual_weight: 0.01
+val_check_interval: 450
+momentum: 0.9
+weight_decay: 0.002
+nesterov: true
+in_channels: 3
+
+labels: mean-teacher/pytorch/data-local/labels/cifar10/1000_balanced_labels/00.txt
+
+# arguments for model
+network: cifar_shakeshake26
+labeled_batch_size: 38
+unlabeled_batch_size: 118
+labeled_sample: 1000
+# dilations: [6, 12, 18]
+
+
+exclude_unlabeled: false

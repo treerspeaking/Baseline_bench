@@ -1,0 +1,1 @@
+python -m methods.mean_teacher --config ./configs/mean_teacher.yaml
