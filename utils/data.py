@@ -66,6 +66,39 @@ class BaseDataset():
             _type_: _description_
         """
         
+        raise NotImplementedError("Subclasses should implement this!")
+
+    
+class MTDataset(BaseDataset):
+    def get_dataloader(
+        self, 
+        labeled_batch_size: int, 
+        labeled_num_worker: int,
+        shuffle: bool, 
+        unlabeled: bool = False, 
+        labeled_size: int = None,
+        unlabeled_batch_size: Union[int, float] = None, 
+        unlabeled_num_worker: int = None,
+        seed: int = None, 
+        ):
+        """return the dataloader for the dataset
+        if the use both labeled and unlabeled set the flag unlabeled to true and other unlabeled input
+        else don't fill the unlabled arguments
+
+        Args:
+            labeled_batch_size (int): _description_
+            labeled_num_worker (int): _description_
+            shuffle (bool): _description_
+            unlabeled (bool, optional): _description_. Defaults to False.
+            labeled_size (int, float): number of labeled image, if float divide by percentage 
+            unlabeled_batch_size (int, optional): _description_. Defaults to None.
+            unlabeled_num_worker (int, optional): _description_. Defaults to None.
+            seed (int, optional): _description_. Defaults to None.
+
+        Returns:
+            _type_: _description_
+        """
+        
         if self.train:
             if unlabeled:
                 X_label, X_unlabeled, y_labeled ,y_unlabeled = self.split_labeled_unlabeled_data(X = self.data, y = self.targets, labeled_size = labeled_size, random_state = seed)
@@ -84,7 +117,7 @@ class BaseDataset():
         
         return test_dataloader
 
-class MySVHN(BaseDataset):
+class MySVHNMT(MTDataset):
     split_list = {
         "train": [
             "http://ufldl.stanford.edu/housenumbers/train_32x32.mat",
@@ -163,9 +196,9 @@ class MySVHN(BaseDataset):
         md5 = self.split_list[self.split][2]
         download_url(self.url, self.root, self.filename, md5)
 
-class MyCifar10(BaseDataset):
+class MyCifar10MT(MTDataset):
     
-    base_folder = "cifar-10-batches-py"
+    base_folder = "./cifar-10-batches-py"
     meta_data = "batches.meta"
     training_list = [
         "data_batch_1",
@@ -285,4 +318,6 @@ class MTUnLabelDataset(BasicUnLabelDataset):
             return self.transforms(img), self.transforms(img)
         
         return img, img
-        
+    
+# class CPS
+

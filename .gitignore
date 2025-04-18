@@ -178,7 +178,7 @@ lightning_logs
 mean-teacher
 
 *.mat
-cifar-10*
+# cifar-10*
 gcc
 .vscode
 cuda

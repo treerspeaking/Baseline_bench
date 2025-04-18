@@ -32,8 +32,8 @@ labels: mean-teacher/pytorch/data-local/labels/cifar10/1000_balanced_labels/00.t
 
 # arguments for model
 network: cifar_shakeshake26
-labeled_batch_size: 38
-unlabeled_batch_size: 118
+labeled_batch_size: 10
+unlabeled_batch_size: 20
 labeled_sample: 1000
 # dilations: [6, 12, 18]
 

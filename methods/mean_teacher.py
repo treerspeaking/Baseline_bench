@@ -13,10 +13,9 @@ from types import SimpleNamespace
 import yaml
 
 from utils.data import (
-    MySVHN, MyCifar10
+    MySVHNMT, MyCifar10MT
 )
 from utils.utils import net_factory
-from utils import data, losses
 
 
 from utils.ramps import sigmoid_ramp_up, cosine_ramp_down
@@ -87,11 +86,13 @@ class MeanTeacher(L.LightningModule):
         stu_out = self.student(combine_data_s)
         tea_out = self.teacher(combine_data_t)
         
+        # implemented this so that it is similar to the origninal MT 
         if isinstance(stu_out, tuple):
             stu_out, stu_out_cons = stu_out
             tea_out, _ = tea_out
             loss_logit = self.logit_loss(stu_out, stu_out_cons) / self.num_classes / mini_batch * self.residual_weight
         else:
+            
             loss_logit = 0 
 
         loss_l = self.ce_loss(stu_out[:labeled_data_len], label) / mini_batch
@@ -206,7 +207,7 @@ class MeanTeacher(L.LightningModule):
         }
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
 
-cifar10_train = MyCifar10(True, transforms=v2.Compose([
+cifar10_train = MyCifar10MT(True, transforms=v2.Compose([
     # data.RandomTranslateWithReflect(4),
     # v2.RandomHorizontalFlip(),
     v2.ToTensor(),
@@ -216,7 +217,7 @@ cifar10_train = MyCifar10(True, transforms=v2.Compose([
     v2.RandomHorizontalFlip()
 ]))
 
-Cifar10_test = MyCifar10(False, transforms=v2.Compose([
+Cifar10_test = MyCifar10MT(False, transforms=v2.Compose([
     v2.ToTensor(),
     v2.Normalize(mean=[0.4914, 0.4822, 0.4465],
                          std=[0.2470,  0.2435,  0.2616]),
