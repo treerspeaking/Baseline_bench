@@ -1,6 +1,7 @@
 import argparse
 
 import lightning as L
+from lightning.pytorch.profilers import AdvancedProfiler
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
 from torchmetrics import Accuracy
 import torch
@@ -11,13 +12,15 @@ import numpy as np
 from types import SimpleNamespace
 import yaml
 
-from data import (
+from utils.data import (
     MySVHN, MyCifar10
 )
 from utils.utils import net_factory
-from utils import data
+from utils import data, losses
+
 
 from utils.ramps import sigmoid_ramp_up, cosine_ramp_down
+
 NO_LABEL = -1
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, required=True)
@@ -29,47 +32,6 @@ parser.add_argument('--config', type=str, required=True)
 
 args = parser.parse_args()
 cfg = yaml.load(open(args.config, "r"), Loader=yaml.Loader)
-
-# Create an args-like object from the config dictionary
-lightning_args = SimpleNamespace(**cfg)
-
-# Add parameters expected by create_data_loaders if not directly in YAML
-# These often correspond to the cli.py arguments
-lightning_args.train_subdir = 'train' # Or load from cfg if specified
-lightning_args.eval_subdir = 'test'  # Or 'val', or load from cfg
-lightning_args.workers = 4           # Or load from cfg
-lightning_args.labels = cfg.get('labels', None)
-lightning_args.exclude_unlabeled = cfg.get('exclude_unlabeled', False)
-# Calculate total batch size
-lightning_args.batch_size = cfg['labeled_batch_size'] + cfg['unlabeled_batch_size']
-
-# Select dataset config function based on YAML
-if lightning_args.dataset == 'cifar10':
-    dataset_config_func = data.cifar10
-elif lightning_args.dataset == 'svhn':
-    dataset_config_func = data.svhn
-# Add other datasets if needed
-# elif lightning_args.dataset == 'imagenet':
-#     dataset_config_func = data.imagenet
-else:
-    raise ValueError(f"Unsupported dataset in config: {lightning_args.dataset}")
-
-dataset_config = dataset_config_func()
-
-# Use datadir from dataset config function, can be overridden by YAML if needed
-datadir = dataset_config['datadir']
-
-dataset_config = dataset_config_func()
-
-train_loader, eval_loader = data.create_data_loaders(
-    train_transformation=dataset_config['train_transformation'],
-    eval_transformation=dataset_config['eval_transformation'],
-    datadir=datadir,
-    args=lightning_args # Pass the namespace created from your config
-)
-
-# Use datadir from dataset config function, can be overridden by YAML if needed
-datadir = cfg.get('data_root', dataset_config['datadir'])
 
 class MeanTeacher(L.LightningModule):
     def __init__(self):
@@ -90,10 +52,10 @@ class MeanTeacher(L.LightningModule):
         self.ramp_down_length = cfg["ramp_down_length"]
         self.ema_decay_during_ramp_up = cfg["ema_decay_during_ramp_up"]
         self.ema_decay_after_ramp_down = cfg["ema_decay_after_ramp_up"]
-        self.lr = cfg["lr"]
-        self.momentum=cfg["momentum"]
-        self.weight_decay=cfg["weight_decay"]
-        self.nesterov=cfg["nesterov"]
+        self.lr = torch.tensor(cfg["lr"])
+        self.momentum=torch.tensor(cfg["momentum"])
+        self.weight_decay=torch.tensor(cfg["weight_decay"])
+        self.nesterov=torch.tensor(cfg["nesterov"])
         self.save_hyperparameters()
         
     def ema(self, student, teacher, alpha):
@@ -110,61 +72,33 @@ class MeanTeacher(L.LightningModule):
             #         t_buffer.data.mul_(alpha).add_((1 - alpha) * s_buffer.data)
             # Non-floating-point buffers (e.g., num_batches_tracked) are left unchanged
             
-            
         
     def training_step(self, batch, batch_idx):
         
+        labeled_data_s, labeled_data_t, label = batch[0]
+        unlabeled_data_s, unlabeled_data_t = batch[1]
+        labeled_data_len = len(labeled_data_s)
+        unlabeled_data_len = len(unlabeled_data_s)
+        mini_batch = labeled_data_len + unlabeled_data_len
         
-        # Unpack the batch provided by the new train_loader
-        (inputs_s, inputs_t), labels = batch # inputs_s/t are augmented views, labels contains NO_LABEL
-
-        # Separate labeled data for classification loss calculation
-        labeled_mask = labels.ne(NO_LABEL)
-        labeled_inputs_s = inputs_s[labeled_mask]
-        labeled_inputs_t = inputs_t[labeled_mask] # Teacher might use this too, or just inputs_t
-        labeled_labels = labels[labeled_mask]
-        labeled_batch_size = labeled_labels.numel() # Actual number of labeled samples in batch
-        
-        # labeled_data_s, labeled_data_t, label = batch[0]
-        # unlabeled_data_s, unlabeled_data_t = batch[1]
-        # labeled_data_len = len(labeled_data_s)
-        # unlabeled_data_len = len(unlabeled_data_s)
-        # mini_batch = labeled_data_len + unlabeled_data_len
-        
-        # combine_data_s = torch.concat((labeled_data_s, unlabeled_data_s), dim=0)
-        # combine_data_t = torch.concat((labeled_data_t, unlabeled_data_t), dim=0)
-        # labeled_data_s, labeled_data_t, label = labeled_inputs_s, labeled_inputs_t, labeled_labels 
-        
-        combine_data_s = inputs_s
-        combine_data_t = inputs_t
-        mini_batch = len(inputs_s)
+        combine_data_s = torch.concat((labeled_data_s, unlabeled_data_s), dim=0)
+        combine_data_t = torch.concat((labeled_data_t, unlabeled_data_t), dim=0)
         
         stu_out = self.student(combine_data_s)
         tea_out = self.teacher(combine_data_t)
         
-        
-        # loss_l = self.ce_loss(stu_out[:labeled_data_len], label) / labeled_data_len 
-        # loss_u = self.mse_loss(F.softmax(stu_out, dim=1), F.softmax(tea_out, dim=1)) / ( mini_batch ) * self.consistency_weight * self.ramp_up(self.global_step)
-        
         if isinstance(stu_out, tuple):
-            stu_out, stu_out_2 = stu_out
+            stu_out, stu_out_cons = stu_out
             tea_out, _ = tea_out
-            loss_logit = self.logit_loss(stu_out, stu_out_2) / self.num_classes / mini_batch * self.residual_weight
+            loss_logit = self.logit_loss(stu_out, stu_out_cons) / self.num_classes / mini_batch * self.residual_weight
         else:
             loss_logit = 0 
 
-        # loss_l = self.ce_loss(stu_out[:labeled_data_len], label) / mini_batch
-        # loss_u = self.mse_loss(F.softmax(stu_out, dim=1), F.softmax(tea_out, dim=1)) / self.num_classes / mini_batch * self.consistency_weight * self.ramp_up(self.current_epoch)
+        loss_l = self.ce_loss(stu_out[:labeled_data_len], label) / mini_batch
+        loss_u = self.mse_loss(F.softmax(stu_out_cons, dim=1), F.softmax(tea_out, dim=1)) / self.num_classes / mini_batch * self.consistency_weight * self.ramp_up(self.current_epoch)
         
-        # # Calculate accuracy for the labeled part
-        # train_acc = self.acc(stu_out[:labeled_data_len], label)
-        # self.log("train_acc", train_acc, on_step=True, on_epoch=False) # Log training accuracy per step
-        
-        loss_l = self.ce_loss(stu_out[labeled_mask], labels[labeled_mask]) / mini_batch
-        loss_u = self.mse_loss(F.softmax(stu_out, dim=1), F.softmax(tea_out, dim=1)) / self.num_classes / mini_batch * self.consistency_weight * self.ramp_up(self.current_epoch)
-        
-        # # Calculate accuracy for the labeled part
-        train_acc = self.acc(stu_out[labeled_mask], labels[labeled_mask])
+        # Calculate accuracy for the labeled part
+        train_acc = self.acc(stu_out[:labeled_data_len], label)
         self.log("train_acc", train_acc, on_step=True, on_epoch=False) # Log training accuracy per step
         
         
@@ -211,15 +145,7 @@ class MeanTeacher(L.LightningModule):
         
         stu_acc = self.acc(stu_out, labels) 
         tea_acc = self.acc(tea_out, labels) 
-        
-        # for i in range(self.num_classes):
-        #     log_dict_preds[f"val_stu_pred_class_{i}"] = (stu_preds == i).sum().item()
-        #     log_dict_preds[f"val_tea_pred_class_{i}"] = (tea_preds == i).sum().item()
-            
-        # self.log_dict(log_dict_preds, on_epoch=True, on_step=False) # Log prediction counts per epoch
-        
-        
-        
+    
         self.log_dict({
             "val_loss_ce_stu": loss_ce_stu, 
             "val_loss_ce_tea": loss_ce_tea,
@@ -249,7 +175,7 @@ class MeanTeacher(L.LightningModule):
 
     def configure_optimizers(self):
         # optimizer = torch.optim.Adam(self.parameters(), lr=cfg["lr"], betas=(cfg["adam_beta_1"], cfg["adam_beta_2_during_ramp_up"]), eps=1e-8)
-        optimizer = torch.optim.SGD(self.parameters(), self.lr,
+        optimizer = torch.optim.SGD(self.student.parameters(), self.lr,
                                 momentum=self.momentum,
                                 weight_decay=self.weight_decay,
                                 nesterov=self.nesterov)
@@ -280,24 +206,24 @@ class MeanTeacher(L.LightningModule):
         }
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
 
-# The code snippet you provided is creating data loaders for the CIFAR-10 dataset.
-# cifar10_train = MyCifar10(True, transforms=v2.Compose([
-#     v2.ToTensor(),
-#     v2.Normalize(mean=[0.4914, 0.4822, 0.4465],
-#                          std=[0.2470,  0.2435,  0.2616]),
-#     v2.RandomAffine(degrees=0, translate=(0.126, 0.126)),
-#     v2.RandomHorizontalFlip(0.5),
-#     v2.GaussianNoise(sigma=0.15)
-# ]))
+cifar10_train = MyCifar10(True, transforms=v2.Compose([
+    # data.RandomTranslateWithReflect(4),
+    # v2.RandomHorizontalFlip(),
+    v2.ToTensor(),
+    v2.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                         std=[0.2470,  0.2435,  0.2616]),
+    v2.RandomAffine(degrees=0, translate=(0.126, 0.126)),
+    v2.RandomHorizontalFlip()
+]))
 
-# Cifar10_test = MyCifar10(False, transforms=v2.Compose([
-#     v2.ToTensor(),
-#     v2.Normalize(mean=[0.4914, 0.4822, 0.4465],
-#                          std=[0.2470,  0.2435,  0.2616]),
-# ]))
+Cifar10_test = MyCifar10(False, transforms=v2.Compose([
+    v2.ToTensor(),
+    v2.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                         std=[0.2470,  0.2435,  0.2616]),
+]))
 
-# labeled_dataloader, unlabeled_dataloader = cifar10_train.get_dataloader(labeled_batch_size=cfg["labeled_batch_size"], labeled_num_worker=4,shuffle = True, unlabeled=True, labeled_size=cfg["labeled_sample"], unlabeled_batch_size=cfg["unlabeled_batch_size"], unlabeled_num_worker = 4, seed= None)
-# test_dataloader = Cifar10_test.get_dataloader(200, 4, False)
+labeled_dataloader, unlabeled_dataloader = cifar10_train.get_dataloader(labeled_batch_size=cfg["labeled_batch_size"], labeled_num_worker=4,shuffle = True, unlabeled=True, labeled_size=cfg["labeled_sample"], unlabeled_batch_size=cfg["unlabeled_batch_size"], unlabeled_num_worker = 4, seed= None)
+test_dataloader = Cifar10_test.get_dataloader(200, 4, False)
 
 # SVHN_train = MySVHN(".", split="train", transforms=v2.Compose([
 #     v2.ToTensor(),
@@ -318,15 +244,17 @@ class MeanTeacher(L.LightningModule):
 
 # print("number labeled:", len(labeled_dataloader))
 # print("number unlabeld:", len(unlabeled_dataloader))
+# print("number test:", len(test_dataloader))
 
-# combine_dataloader = CombinedLoader([labeled_dataloader, unlabeled_dataloader], mode="max_size_cycle")
+train_loader = CombinedLoader([labeled_dataloader, unlabeled_dataloader], mode="max_size_cycle")
 
 trainer = L.Trainer(
     max_steps=cfg["steps"], 
-    enable_checkpointing=True, 
-    log_every_n_steps=10, 
+    enable_checkpointing=False, 
+    log_every_n_steps=100, 
     check_val_every_n_epoch=None, 
     val_check_interval=cfg["val_check_interval"],
-    accumulate_grad_batches = 1
+    # accumulate_grad_batches = 1
+    benchmark=True,
     )
-trainer.fit(model=MeanTeacher(), train_dataloaders=train_loader, val_dataloaders=eval_loader)
+trainer.fit(model=MeanTeacher(), train_dataloaders=train_loader, val_dataloaders=test_dataloader)

@@ -1,270 +1,288 @@
-# data.py
-
-import itertools
 import os
-import logging
-from PIL import Image
+from typing import Any, Callable, Optional, Tuple, Union
+import itertools
+from pathlib import Path
+
+import pickle
 import numpy as np
+from PIL import Image
+from sklearn.model_selection import train_test_split
 
 import torch
-import torchvision
-import torchvision.transforms as transforms
-from torch.utils.data.sampler import Sampler, SubsetRandomSampler, BatchSampler
-from torch.utils.data import DataLoader
+from torchvision import datasets
+from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms import v2
+from torchvision.transforms.v2 import Transform
+from torchvision.datasets.utils import check_integrity, download_url, verify_str_arg
 
-NO_LABEL = -1
+class BaseDataset():
+    
+    def __init__(self, train: bool, transforms: Transform):
+        self.train = train
+        self.transforms = transforms
+    
+    def split_labeled_unlabeled_data(self, X, y, labeled_size: Union[int, float], random_state:int = None):
+        """_summary_
 
-# Helper function placeholder (replace with actual implementation if available)
-def assert_exactly_one(args_list):
-    true_args = sum(1 for arg in args_list if arg)
-    assert true_args == 1, "Exactly one of the arguments must be True/provided"
+        Args:
+            X (_type_): train_input
+            y (_type_): train_output
+            train_size (Union[int, float]): number of training images
+            random_state (int, optional): the random training state, none mean random state
 
-# === Transformation Classes ===
+        Returns:
+            _splitting : list, length=2 * len(arrays)
+                List containing label-unlabels split of inputs.
+        """
+        # stratify ensure that it is an equal distribution split for each class
+        return train_test_split(X, y, train_size=labeled_size, stratify=y, random_state=random_state)
+    
+    def get_dataloader(
+        self, 
+        labeled_batch_size: int, 
+        labeled_num_worker: int,
+        shuffle: bool, 
+        unlabeled: bool = False, 
+        labeled_size: int = None,
+        unlabeled_batch_size: Union[int, float] = None, 
+        unlabeled_num_worker: int = None,
+        seed: int = None, 
+        ):
+        """return the dataloader for the dataset
+        if the use both labeled and unlabeled set the flag unlabeled to true and other unlabeled input
+        else don't fill the unlabled arguments
 
-class RandomTranslateWithReflect:
-    def __init__(self, max_translation):
-        self.max_translation = max_translation
+        Args:
+            labeled_batch_size (int): _description_
+            labeled_num_worker (int): _description_
+            shuffle (bool): _description_
+            unlabeled (bool, optional): _description_. Defaults to False.
+            labeled_size (int, float): number of labeled image, if float divide by percentage 
+            unlabeled_batch_size (int, optional): _description_. Defaults to None.
+            unlabeled_num_worker (int, optional): _description_. Defaults to None.
+            seed (int, optional): _description_. Defaults to None.
 
-    def __call__(self, old_image):
-        xtranslation, ytranslation = np.random.randint(-self.max_translation,
-                                                       self.max_translation + 1,
-                                                       size=2)
-        xpad, ypad = abs(xtranslation), abs(ytranslation)
-        xsize, ysize = old_image.size
+        Returns:
+            _type_: _description_
+        """
+        
+        if self.train:
+            if unlabeled:
+                X_label, X_unlabeled, y_labeled ,y_unlabeled = self.split_labeled_unlabeled_data(X = self.data, y = self.targets, labeled_size = labeled_size, random_state = seed)
+                labeled_ds = MTLabelDataset(X_label, y_labeled, self.transforms)
+                unlabeled_ds = MTUnLabelDataset(X_unlabeled, self.transforms)
+                unlabeled_dataloader = DataLoader(unlabeled_ds, unlabeled_batch_size, shuffle, num_workers=unlabeled_num_worker)
+                labeled_dataloader = DataLoader(labeled_ds, labeled_batch_size, shuffle, num_workers=labeled_num_worker)
+                return labeled_dataloader, unlabeled_dataloader
+            
+            ds = MTLabelDataset(self.data, self.targets, self.transforms)
+            labeled_dataloader = DataLoader(ds, labeled_batch_size, shuffle, num_workers=labeled_num_worker)
+            return labeled_dataloader
+        
+        ds = BasicLabelDataset(self.data, self.targets, self.transforms)
+        test_dataloader = DataLoader(ds, labeled_batch_size, shuffle, num_workers=labeled_num_worker)
+        
+        return test_dataloader
 
-        flipped_lr = old_image.transpose(Image.FLIP_LEFT_RIGHT)
-        flipped_tb = old_image.transpose(Image.FLIP_TOP_BOTTOM)
-        flipped_both = old_image.transpose(Image.ROTATE_180)
+class MySVHN(BaseDataset):
+    split_list = {
+        "train": [
+            "http://ufldl.stanford.edu/housenumbers/train_32x32.mat",
+            "train_32x32.mat",
+            "e26dedcc434d2e4c54c9b2d4a06d8373",
+        ],
+        "test": [
+            "http://ufldl.stanford.edu/housenumbers/test_32x32.mat",
+            "test_32x32.mat",
+            "eb5a983be6a315427106f1b164d9cef3",
+        ],
+        "extra": [
+            "http://ufldl.stanford.edu/housenumbers/extra_32x32.mat",
+            "extra_32x32.mat",
+            "a93ce644f1a588dc4d68dda5feec44a7",
+        ],
+    }
 
-        new_image = Image.new("RGB", (xsize + 2 * xpad, ysize + 2 * ypad))
-        new_image.paste(old_image, (xpad, ypad))
-        new_image.paste(flipped_lr, (xpad + xsize - 1, ypad))
-        new_image.paste(flipped_lr, (xpad - xsize + 1, ypad))
-        new_image.paste(flipped_tb, (xpad, ypad + ysize - 1))
-        new_image.paste(flipped_tb, (xpad, ypad - ysize + 1))
-        new_image.paste(flipped_both, (xpad - xsize + 1, ypad - ysize + 1))
-        new_image.paste(flipped_both, (xpad + xsize - 1, ypad - ysize + 1))
-        new_image.paste(flipped_both, (xpad - xsize + 1, ypad + ysize - 1))
-        new_image.paste(flipped_both, (xpad + xsize - 1, ypad + ysize - 1))
+    def __init__(
+        self,
+        root: Union[str, Path],
+        split: str = "train",
+        transforms: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        download: bool = False,
+    ) -> None:
+        if isinstance(root, str):
+            root = os.path.expanduser(root)
+        self.root = root
+        self.split = verify_str_arg(split, "split", tuple(self.split_list.keys()))
+        self.url = self.split_list[split][0]
+        self.filename = self.split_list[split][1]
+        self.file_md5 = self.split_list[split][2]
 
-        new_image = new_image.crop((xpad - xtranslation,
-                                    ypad - ytranslation,
-                                    xpad + xsize - xtranslation,
-                                    ypad + ysize - ytranslation))
-        return new_image
+        if download:
+            self.download()
 
-class TransformTwice:
-    def __init__(self, transform):
-        self.transform = transform
+        if not self._check_integrity():
+            raise RuntimeError("Dataset not found or corrupted. You can use download=True to download it")
 
-    def __call__(self, inp):
-        out1 = self.transform(inp)
-        out2 = self.transform(inp)
-        return out1, out2
+        # import here rather than at top of file because this is
+        # an optional dependency for torchvision
+        import scipy.io as sio
 
-# === Data Loading Helpers ===
+        # reading(loading) mat file as array
+        loaded_mat = sio.loadmat(os.path.join(self.root, self.filename))
 
-def relabel_dataset(dataset, labels):
-    unlabeled_idxs = []
-    labeled_idxs_map = {} # Store original index to new label
-    original_imgs = list(dataset.imgs) # Make a copy to modify safely
+        self.data = loaded_mat["X"]
+        # loading from the .mat file gives an np.ndarray of type np.uint8
+        # converting to np.int64, so that we have a LongTensor after
+        # the conversion from the numpy array
+        # the squeeze is needed to obtain a 1D tensor
+        self.targets = loaded_mat["y"].astype(np.int64).squeeze()
 
-    for idx in range(len(original_imgs)):
-        path, _ = original_imgs[idx]
-        filename = os.path.basename(path)
-        if filename in labels:
-            label_name = labels[filename]
-            if label_name in dataset.class_to_idx:
-                 label_idx = dataset.class_to_idx[label_name]
-                 dataset.imgs[idx] = (path, label_idx) # Update the dataset's list
-                 labeled_idxs_map[idx] = label_idx
-                 del labels[filename] # Mark label as used
-            # else: # Optional: Handle case where label name isn't a valid class
-            #      print(f"Warning: Label '{label_name}' for file '{filename}' not in class_to_idx. Treating as unlabeled.")
-            #      dataset.imgs[idx] = (path, NO_LABEL)
-            #      unlabeled_idxs.append(idx)
-
+        # the svhn dataset assigns the class label "10" to the digit 0
+        # this makes it inconsistent with several loss functions
+        # which expect the class labels to be in the range [0, C-1]
+        np.place(self.targets, self.targets == 10, 0)
+        # self.data = np.transpose(self.data, (3, 2, 0, 1))
+        self.data = np.transpose(self.data, (3, 0, 1, 2))
+        
+        if split == "train" or split == "extra":
+            self.train = True
         else:
-            dataset.imgs[idx] = (path, NO_LABEL) # Update the dataset's list
-            unlabeled_idxs.append(idx)
+            self.train = False
+            
+        self.transforms = transforms
+        
+    def _check_integrity(self) -> bool:
+        root = self.root
+        md5 = self.split_list[self.split][2]
+        fpath = os.path.join(root, self.filename)
+        return check_integrity(fpath, md5)
+    
+    def download(self) -> None:
+        md5 = self.split_list[self.split][2]
+        download_url(self.url, self.root, self.filename, md5)
 
-    if len(labels) != 0:
-        message = "List of labels contains {} unknown files: {}, ..."
-        some_missing = ', '.join(list(labels.keys())[:5])
-        # Consider making this a warning instead of an error if appropriate
-        logging.warning(message.format(len(labels), some_missing))
-        # raise LookupError(message.format(len(labels), some_missing))
+class MyCifar10(BaseDataset):
+    
+    base_folder = "cifar-10-batches-py"
+    meta_data = "batches.meta"
+    training_list = [
+        "data_batch_1",
+        "data_batch_2",
+        "data_batch_3",
+        "data_batch_4",
+        "data_batch_5",
+        ]
+    test_list = [
+        "test_batch",
+        ]
+    
+    def __init__(self, train: bool, transforms: Transform):
+        """
 
-
-    labeled_idxs = sorted(labeled_idxs_map.keys())
-
-    # Update dataset targets (important for SubsetRandomSampler if used later)
-    dataset.targets = [label if idx not in unlabeled_idxs else NO_LABEL for idx, (_, label) in enumerate(dataset.imgs)]
-
-
-    return labeled_idxs, unlabeled_idxs
-
-
-# === Sampler ===
-
-class TwoStreamBatchSampler(Sampler):
-    def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size):
-        self.primary_indices = primary_indices # Typically unlabeled
-        self.secondary_indices = secondary_indices # Typically labeled
-        self.secondary_batch_size = secondary_batch_size
-        self.primary_batch_size = batch_size - secondary_batch_size
-
-        assert len(self.primary_indices) >= self.primary_batch_size > 0, \
-            f"Not enough primary indices ({len(self.primary_indices)}) for primary batch size ({self.primary_batch_size})"
-        assert len(self.secondary_indices) >= self.secondary_batch_size > 0, \
-            f"Not enough secondary indices ({len(self.secondary_indices)}) for secondary batch size ({self.secondary_batch_size})"
-
-
-    def __iter__(self):
-        primary_iter = iterate_once(self.primary_indices)
-        secondary_iter = iterate_eternally(self.secondary_indices)
-        return (
-            # Note: the order is changed here to unlabeled first, then labeled
-            # This matches the original intent where primary=unlabeled, secondary=labeled
-            primary_batch + secondary_batch
-            for (primary_batch, secondary_batch)
-            in  zip(grouper(primary_iter, self.primary_batch_size),
-                    grouper(secondary_iter, self.secondary_batch_size))
-        )
-
+        Args:
+            train (Bool): if True this will read train dataset else it will read test dataset
+            transforms (Transform): the transformations that will be apply to the dataset
+        """
+        super().__init__(train, transforms)
+        
+        self.data = []
+        self.targets = []
+        
+        if train:
+            self.file_list = self.training_list
+        else:
+            self.file_list = self.test_list
+        
+        for file_name in self.file_list:
+            fpath = os.path.join(os.path.curdir, self.base_folder, file_name)
+            with open(fpath, 'rb') as f:
+                entry = pickle.load(f, encoding='latin1')
+                self.data.append(entry["data"])
+                self.targets.extend(entry["labels"])
+        
+        self.data = np.vstack(self.data).reshape(-1, 3, 32, 32)
+        self.data = self.data.transpose((0, 2, 3, 1)) 
+        
+    def _load_meta(self):
+        path = os.path.join(os.path.curdir, self.base_folder, self.meta_data)
+        with open(path, "rb") as infile:
+            data = pickle.load(infile, encoding="latin1")
+            self.classes = data[self.meta_data["key"]]
+        self.class_to_idx = {_class: i for i, _class in enumerate(self.classes)}
+        
+    
+class BasicLabelDataset(Dataset):
+    
+    def __init__(self, data, targets, transforms):
+        super().__init__()
+        self.data = data
+        self.targets = targets
+        self.transforms = transforms
+    
     def __len__(self):
-        # Length based on unlabeled data iterator
-        return len(self.primary_indices) // self.primary_batch_size
+        return len(self.data)
+    
+    def __getitem__(self, index):
+        
+        img, target = self.data[index], self.targets[index]
 
-def iterate_once(iterable):
-    return np.random.permutation(iterable)
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(img)
+        
+        # return two different view at once
+        if self.transforms is not None:
+            return self.transforms(img), target
+        return img, target
 
-def iterate_eternally(indices):
-    def infinite_shuffles():
-        while True:
-            yield np.random.permutation(indices)
-    return itertools.chain.from_iterable(infinite_shuffles())
+class BasicUnLabelDataset(Dataset):
+    def __init__(self, data, transforms):
+        super().__init__()
+        self.data = data
+        self.transforms = transforms
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, index):
+        img = self.data[index]
 
-def grouper(iterable, n):
-    args = [iter(iterable)] * n
-    # Use zip_longest if you need to handle the last batch potentially being smaller
-    # from itertools import zip_longest
-    # return zip_longest(*args, fillvalue=None)
-    # Using zip drops the last incomplete batch, matching BatchSampler(drop_last=True)
-    return zip(*args)
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(img)
+        
+        if self.transforms is not None:
+            return self.transforms(img)
+        
+        return img
+    
+    
+class MTLabelDataset(BasicLabelDataset):
+    def __getitem__(self, index):
+        img, target = self.data[index], self.targets[index]
 
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(img)
+        
+        # return two different view at once
+        if self.transforms is not None:
+            return self.transforms(img), self.transforms(img) ,target
+        return img, img, target
+    
+class MTUnLabelDataset(BasicUnLabelDataset):
+    
+    def __getitem__(self, index):
+        img = self.data[index]
 
-# === Dataset Configurations ===
-
-def imagenet():
-    channel_stats = dict(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225])
-    train_transformation = TransformTwice(transforms.Compose([
-        transforms.RandomRotation(10),
-        transforms.RandomResizedCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
-        transforms.ToTensor(),
-        transforms.Normalize(**channel_stats)
-    ]))
-    eval_transformation = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(**channel_stats)
-    ])
-    return {
-        'train_transformation': train_transformation,
-        'eval_transformation': eval_transformation,
-        'datadir': 'data-local/images/ilsvrc2012/',
-        'num_classes': 1000
-    }
-
-def cifar10():
-    channel_stats = dict(mean=[0.4914, 0.4822, 0.4465],
-                         std=[0.2470,  0.2435,  0.2616])
-    train_transformation = TransformTwice(transforms.Compose([
-        RandomTranslateWithReflect(4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(**channel_stats)
-    ]))
-    eval_transformation = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(**channel_stats)
-    ])
-    return {
-        'train_transformation': train_transformation,
-        'eval_transformation': eval_transformation,
-        # Note: Adjust 'datadir' if your CIFAR-10 structure is different
-        # This path assumes images are organized in class subfolders (by-image)
-        'datadir': 'mean-teacher/pytorch/data-local/images/cifar/cifar10/by-image',
-        'num_classes': 10
-    }
-
-# Add SVHN dataset config if needed
-def svhn():
-     channel_stats = dict(mean=[0.4377, 0.4438, 0.4728],
-                          std=[0.1980, 0.2010, 0.1970])
-     # Note: Original Mean Teacher paper didn't use HFlip for SVHN
-     # RandomAffine matches the translation used in the Lightning code
-     train_transformation = TransformTwice(transforms.Compose([
-         # RandomTranslateWithReflect(4), # Equivalent to translate 4/32 = 0.125. Lightning code used 0.0626.
-         transforms.RandomAffine(degrees=0, translate=(0.0626, 0.0626)),
-         transforms.ToTensor(),
-         transforms.Normalize(**channel_stats)
-     ]))
-     eval_transformation = transforms.Compose([
-         transforms.ToTensor(),
-         transforms.Normalize(**channel_stats)
-     ])
-     return {
-         'train_transformation': train_transformation,
-         'eval_transformation': eval_transformation,
-         # Note: Adjust 'datadir' if your SVHN structure is different
-         'datadir': 'data-local/images/svhn', # Example path
-         'num_classes': 10
-     }
-
-
-# === Main Data Loader Creation Function ===
-
-def create_data_loaders(train_transformation,
-                        eval_transformation,
-                        datadir,
-                        args):
-    traindir = os.path.join(datadir, args.train_subdir)
-    evaldir = os.path.join(datadir, args.eval_subdir)
-
-    assert_exactly_one([args.exclude_unlabeled, args.labeled_batch_size])
-
-    dataset = torchvision.datasets.ImageFolder(traindir, train_transformation)
-
-    if args.labels:
-        with open(args.labels) as f:
-            labels = dict(line.split(' ') for line in f.read().splitlines())
-        labeled_idxs, unlabeled_idxs = relabel_dataset(dataset, labels)
-
-    if args.exclude_unlabeled:
-        sampler = SubsetRandomSampler(labeled_idxs)
-        batch_sampler = BatchSampler(sampler, args.batch_size, drop_last=True)
-    elif args.labeled_batch_size:
-        batch_sampler = TwoStreamBatchSampler(
-            unlabeled_idxs, labeled_idxs, args.batch_size, args.labeled_batch_size)
-    else:
-        assert False, "labeled batch size {}".format(args.labeled_batch_size)
-
-    train_loader = torch.utils.data.DataLoader(dataset,
-                                               batch_sampler=batch_sampler,
-                                               num_workers=args.workers,
-                                               pin_memory=True)
-
-    eval_loader = torch.utils.data.DataLoader(
-        torchvision.datasets.ImageFolder(evaldir, eval_transformation),
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=2 * args.workers,  # Needs images twice as fast
-        pin_memory=True,
-        drop_last=False)
-
-    return train_loader, eval_loader
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(img)
+        
+        if self.transforms is not None:
+            return self.transforms(img), self.transforms(img)
+        
+        return img, img
+        

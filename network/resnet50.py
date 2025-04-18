@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from functools import partial
 from collections import OrderedDict
-from config import config
+# from config import config
 # from base_model import resnet50
 from torchvision.models import resnet50
 
